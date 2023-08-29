@@ -1,6 +1,6 @@
 # Permitted IP list headers - StartIP,EndIP
 
-# DB list headers - 
+# DB list headers - Name,ResourceGroup
 
 $DBList = import-csv ''
 
