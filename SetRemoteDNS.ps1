@@ -1,0 +1,125 @@
+param(
+    [string]$server
+)
+
+
+if ( $server -eq '' ) {
+    Write-Output "No server name provided"
+    return
+} else { 
+    try {
+        $tcpConnection = New-Object System.Net.Sockets.TcpClient($server, 5985)
+        $tcpConnection.Close()
+        } catch {
+        Write-Output "DNS failed to resolve or TCP/5985 is blocked"
+        return
+        }
+}
+
+$sess = New-PSSession -computerName $server
+
+Invoke-Command -Session $sess -Scriptblock {
+
+function IsIPInRange($ip, $rangeStart, $rangeEnd) {
+    $ipDecimal = [System.Net.IPAddress]::Parse($ip).GetAddressBytes()
+        [Array]::Reverse($ipDecimal)
+        $ipLong = [System.BitConverter]::ToUInt32($ipDecimal, 0)
+     
+    $startDecimal = [System.Net.IPAddress]::Parse($rangeStart).GetAddressBytes()
+        [Array]::Reverse($startDecimal)
+        $startLong = [System.BitConverter]::ToUInt32($startDecimal, 0)
+     
+    $endDecimal = [System.Net.IPAddress]::Parse($rangeEnd).GetAddressBytes()
+        [Array]::Reverse($endDecimal)
+        $endLong = [System.BitConverter]::ToUInt32($endDecimal, 0)
+     
+        if ( $ipLong -ge $startLong -and $ipLong -le $endLong ) {
+            return 1
+        } else {
+            return 0
+        }
+    }
+
+$adapter = Get-WmiObject -Class Win32_NetworkAdapterConfiguration -filter "(ipenabled = 'true') and (ipconnectionmetric != '')"  | Where-Object {$_.DefaultIPGateway -ne $null}
+
+switch ($adapter.DefaultIPGateway) {
+    "50.50.50.1" {
+        $Ranges = @(
+            @("50.50.50.1", "50.50.50.127"),
+            @("50.50.50.128", "50.50.50.255")
+            )
+        $origDNSServers = "50.50.50.100", "50.50.50.101"
+        $newDNSServers = "50.50.50.200", "50.50.50.201", "80.80.80.200"
+    }
+    "60.60.60.1" {
+        $Ranges = @(
+            @("60.60.60.1", "60.60.60.50"),
+            @("70.70.70.1", "70.70.70.255")
+            )
+        $origDNSServers = "60.60.60.100", "60.60.60.101"
+        $newDNSServers = "60.60.60.15", "60.60.60.16", "80.80.80.15"
+    }
+    "80.80.80.1" {
+        $Ranges = @(
+            @("80.80.80.1", "80.80.80.127"),
+            @("80.80.80.128", "50.50.50.255")
+            )
+        $origDNSServers = "80.80.80.100", "80.80.80.101"
+        $newDNSServers = "80.80.80.200", "80.80.80.201", "50.50.50.201"
+    }
+    default {
+        Write-Host "An unexpected default gateway IP was returned "
+        Exit-PSSession
+		return
+    }
+}
+
+ 
+$inRange = $false
+foreach ($range in @($ranges)) {
+    if (IsIPInRange $adapter.IPAddress[0] $range[0] $range[1]) {
+        $inRange = $true
+        }
+    }
+if (( $adapter.DHCPEnabled )) {
+    $Output = [PSCustomObject]@{
+        Status = 'Current'
+        Server = $($adapter.DNSHostName)
+        Number = $($adapter.Index)
+        DHCP = $($adapter.DHCPEnabled)
+        IP = $($adapter.IPAddress[0])
+        DNS = $($adapter.DNSServerSearchOrder -join ',')
+        InRange = $inRange
+        }
+    Write-EventLog -LogName "System" -Source "Microsoft-Windows-DNS-Client" -EventID 50000 -EntryType Information -Message $Output -Category 1
+	Write-Output $Output
+	} elseif ( $inRange -and ( -not $adapter.DHCPEnabled ) )  {
+    $Output = [PSCustomObject]@{
+        Status = 'Current'
+        Server = $($adapter.PSComputerName)
+        Number = $($adapter.Index)
+        DHCP = $($adapter.DHCPEnabled)
+        IP = $($adapter.IPAddress[0])
+        DNS = $($adapter.DNSServerSearchOrder -join ',')
+        InRange = $inRange
+        }
+        Write-EventLog -LogName "System" -Source "Microsoft-Windows-DNS-Client" -EventID 50000 -EntryType Information -Message $Output -Category 1
+        Write-Output $Output
+        $adapter.SetDNSServerSearchOrder($newDNSServers) > $null
+	    $newadapter = Get-WmiObject -Class Win32_NetworkAdapterConfiguration -filter "Index = $($adapter.Index)"
+        $Output = [PSCustomObject]@{
+            Status = 'New'
+            Server = $($newadapter.PSComputerName)
+            Number = $($newadapter.Index)
+            DHCP = $($newadapter.DHCPEnabled)
+            IP = $($newadapter.IPAddress[0])
+            DNS = $($newadapter.DNSServerSearchOrder -join ',')
+            InRange = $inRange
+            }
+        Write-EventLog -LogName "System" -Source "Microsoft-Windows-DNS-Client" -EventID 50000 -EntryType Information -Message $Output -Category 5
+        Write-Output $Output
+		}
+
+}
+
+Remove-PSSession $sess
